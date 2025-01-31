@@ -1,7 +1,6 @@
 import functions_framework
-import fetch_pdfs
 import fetchDocuments
-import sendData
+import fetchData
 import logging
 
 # Initialize logging
@@ -18,14 +17,6 @@ def fetch_and_process_documents(request):
     # Fetch document metadata
     logging.info("Fetching document metadata...")
     fetchDocuments.main()
-
-    # Download PDFs and extract text
-    logging.info("Downloading PDFs and extracting text...")
-    fetch_pdfs.main()
-
-    # Send extracted text to BigQuery
-    logging.info("Uploading text data to BigQuery...")
-    sendData.main()
 
     logging.info("Process completed successfully.")
     return "Documents processed successfully", 200
