@@ -1,3 +1,4 @@
+import functions_framework
 import requests
 import pandas as pd
 import logging
@@ -85,10 +86,22 @@ def gather_data(entity, expand=None, save_every=500):
 def upload_to_bigquery(data):
     """Upload document metadata to BigQuery."""
     df = pd.DataFrame(data)
+
+    # Ensure that there is data to upload
+    if df.empty:
+        logging.info("No new data to upload.")
+        return
+
     job = bq_client.load_table_from_dataframe(df, BQ_TABLE_ID)
     job.result()  # Wait for job completion
     logging.info(f"Uploaded {len(df)} documents to BigQuery.")
 
+@functions_framework.http
 def fetch_and_store_documents(request):
-    """Cloud Function entry point."""
-    return gather_data("Document", save_every=5000)
+    """Cloud Function HTTP Entry Point."""
+    try:
+        result = gather_data("Document", save_every=5000)
+        return (result, 200)
+    except Exception as e:
+        logging.error(f"Error during execution: {e}")
+        return (f"Error: {str(e)}", 500)
