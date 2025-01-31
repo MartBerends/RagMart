@@ -1,6 +1,6 @@
-requests==2.31.0
-pandas==2.0.3
-pypdf2==3.0.1
+requests
+pandas
+pypdf2
 google-cloud-storage
 google-cloud-bigquery
 google-cloud-functions
