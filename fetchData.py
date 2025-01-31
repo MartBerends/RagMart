@@ -1,124 +1,94 @@
-import os
-import pandas as pd
 import requests
-import time
-from PyPDF2 import PdfReader
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import pandas as pd
+import logging
+from google.cloud import bigquery
 
-# Configuration
-CSV_FILE = "document_data.csv"
-PDF_FOLDER = "pdfs/"
-TEXT_FOLDER = "texts/"
-FAILED_FILES = "failed_files.txt"  # File to track failed PDFs
-BATCH_SIZE = 5000  # Number of PDFs to process in one run
-MAX_THREADS = 5  # Number of parallel threads for faster processing
+# Google Cloud Configuration
+PROJECT_ID = "corded-forge-417909"  # Your Google Cloud Project ID
+BQ_DATASET_ID = "ProjectRAGMart"  # Your BigQuery Dataset
+BQ_TABLE_ID = f"{PROJECT_ID}.{BQ_DATASET_ID}.documents"  # BigQuery Table
 
-# Create directories if they don't exist
-os.makedirs(PDF_FOLDER, exist_ok=True)
-os.makedirs(TEXT_FOLDER, exist_ok=True)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
-# Load previously failed files to skip them
-if os.path.exists(FAILED_FILES):
-    with open(FAILED_FILES, "r") as f:
-        failed_files = set(f.read().splitlines())  # Store failed file IDs
-else:
-    failed_files = set()
+# Initialize BigQuery client
+bq_client = bigquery.Client()
 
-def download_pdf(document_id):
-    """Download a PDF document using its ID."""
-    url = f"https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0/Document({document_id})/resource"
-    pdf_path = os.path.join(PDF_FOLDER, f"{document_id}.pdf")
+BASE_URL = "https://gegevensmagazijn.tweedekamer.nl/OData/v4/2.0/"
+
+def fetch_data(entity, top=100, skip=0, expand=None):
+    """Fetch data from the overheid API."""
+    url = f"{BASE_URL}{entity}?$top={top}&$skip={skip}"
+    if expand:
+        url += f"&$expand={expand}"
     
-    try:
-        response = requests.get(url, stream=True)
-        if response.status_code == 200:
-            with open(pdf_path, "wb") as f:
-                f.write(response.content)
-            return pdf_path
-        elif response.status_code == 429:
-            print(f"Rate limit reached (429) for {url}. Pausing...")
-            time.sleep(20)
-            return None
-        else:
-            print(f"Failed to download {url}: {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"Error downloading PDF {document_id}: {e}")
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        logging.error(f"Error fetching {entity}: {response.status_code}")
         return None
 
-def extract_text_from_pdf(pdf_path, document_id):
-    """Extract text from a PDF and save it as a text file. Skip corrupt files."""
-    try:
-        reader = PdfReader(pdf_path)
-        text = "".join(page.extract_text() or "" for page in reader.pages)
-        
-        if not text.strip():  # If no text is extracted, consider it a failed file
-            raise ValueError("No text found")
-
-        text_path = os.path.join(TEXT_FOLDER, os.path.basename(pdf_path).replace(".pdf", ".txt"))
-        with open(text_path, "w", encoding="utf-8") as f:
-            f.write(text)
-
-        os.remove(pdf_path)  # Delete the PDF after extracting text
-        return text_path
-
-    except Exception as e:
-        print(f"Error extracting text from {pdf_path}: {e}")
-        failed_files.add(document_id)  # Mark as failed to skip next time
-        with open(FAILED_FILES, "a") as f:
-            f.write(document_id + "\n")
+def get_total_count(entity):
+    """Retrieve total document count from the overheid API."""
+    url = f"{BASE_URL}{entity}/$count"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return int(response.text)
+    else:
+        logging.error(f"Error fetching count for {entity}: {response.status_code}")
         return None
 
-def is_already_processed(document_id):
-    """Check if a document's text file already exists or was previously marked as failed."""
-    return (os.path.exists(os.path.join(TEXT_FOLDER, f"{document_id}.txt")) or
-            document_id in failed_files)
+def get_existing_document_ids():
+    """Retrieve already processed document IDs from BigQuery."""
+    query = f"SELECT Id FROM `{BQ_TABLE_ID}`"
+    query_job = bq_client.query(query)
+    return {row["Id"] for row in query_job.result()}  # Return a set of IDs
 
-def count_total_documents(csv_file):
-    """Count total valid documents (excluding deleted or missing IDs)."""
-    df = pd.read_csv(csv_file)
-    valid_docs = df[(~df["Id"].isna()) & (df["Verwijderd"] != True)]
-    return len(valid_docs)
-
-def count_processed_documents():
-    """Count already processed text files."""
-    return len([f for f in os.listdir(TEXT_FOLDER) if f.endswith(".txt")])
-
-def process_documents(csv_file, batch_size):
-    """Process documents in parallel using multithreading while skipping failed ones."""
-    df = pd.read_csv(csv_file)
-    total_documents = count_total_documents(csv_file)
-    processed_count = count_processed_documents()
+def gather_data(entity, expand=None, save_every=500):
+    """Fetch new documents and store them in BigQuery."""
+    existing_docs = get_existing_document_ids()
+    total_count = get_total_count(entity)
     
-    print(f"Total valid documents: {total_documents}")
-    print(f"Already processed: {processed_count}")
+    if total_count is None:
+        return "Error retrieving total count."
 
-    # Get list of unprocessed document IDs (excluding failed files)
-    document_ids = [
-        row["Id"] for _, row in df.iterrows()
-        if not pd.isna(row["Id"]) and not is_already_processed(row["Id"]) and row.get("Verwijderd", False) != True
-    ]
-    
-    # Limit batch size
-    document_ids = document_ids[:batch_size]
+    logging.info(f"Total records to fetch for {entity}: {total_count}")
 
-    # Process PDFs in parallel
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        future_to_id = {executor.submit(download_pdf, doc_id): doc_id for doc_id in document_ids}
-        
-        for future in as_completed(future_to_id):
-            doc_id = future_to_id[future]
-            pdf_path = future.result()
-            if pdf_path:
-                executor.submit(extract_text_from_pdf, pdf_path, doc_id)
-            
-            # Track progress
-            processed_count += 1
-            if processed_count % 2 == 0 or processed_count == len(document_ids):  # Log every 10 files
-                progress_percentage = (processed_count / total_documents) * 100
-                print(f"Progress: {processed_count}/{total_documents} ({progress_percentage:.2f}%)")
+    data = []
+    skip = len(existing_docs)  # Start from where we left off
 
-    print(f"Final Progress: {processed_count}/{total_documents} ({(processed_count / total_documents) * 100:.2f}%)")
+    while skip < total_count:
+        logging.info(f"Fetching {entity} records starting at offset {skip}... / {total_count}")
+        result = fetch_data(entity, expand=expand, skip=skip)
 
-if __name__ == "__main__":
-    process_documents(CSV_FILE, BATCH_SIZE)
+        if not result or "value" not in result or not result["value"]:
+            break
+
+        new_records = [
+            row for row in result["value"] if row["Id"] not in existing_docs
+        ]
+        data.extend(new_records)
+        skip += 100
+
+        # Save in batches
+        if len(data) >= save_every:
+            upload_to_bigquery(data)
+            data = []
+
+    # Final batch upload
+    if data:
+        upload_to_bigquery(data)
+
+    return f"Fetched and stored {total_count - len(existing_docs)} new records."
+
+def upload_to_bigquery(data):
+    """Upload document metadata to BigQuery."""
+    df = pd.DataFrame(data)
+    job = bq_client.load_table_from_dataframe(df, BQ_TABLE_ID)
+    job.result()  # Wait for job completion
+    logging.info(f"Uploaded {len(df)} documents to BigQuery.")
+
+def fetch_and_store_documents(request):
+    """Cloud Function entry point."""
+    return gather_data("Document", save_every=5000)
