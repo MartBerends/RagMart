@@ -10,14 +10,18 @@ logging.basicConfig(level=logging.INFO)
 def fetch_and_process_documents(request):
     """
     This function is triggered by an HTTP request.
-    It fetches PDF documents, extracts text, and uploads it to BigQuery.
+    It first fetches document metadata, then downloads PDFs, extracts text,
+    and uploads everything to BigQuery.
     """
-    logging.info("Starting document fetching process...")
-    
-    # Fetch document metadata
+    logging.info("Starting document fetching and processing pipeline...")
+
+    # Step 1: Fetch document metadata from overheid API and store in BigQuery
     logging.info("Fetching document metadata...")
-    fetchDocuments.main()
+    fetchData.fetch_and_store_documents(request)  # <-- Call fetchData function
 
-    logging.info("Process completed successfully.")
-    return "Documents processed successfully", 200
+    # Step 2: Process the documents (download, extract text, upload text)
+    logging.info("Processing and extracting text from PDFs...")
+    fetchDocuments.fetch_and_process_documents(request)  # <-- Call fetchDocuments function
 
+    logging.info("All documents processed successfully.")
+    return "Documents fetched and processed successfully", 200
